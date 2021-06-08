@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+      "use strict";
+
+      import { init } from "./shared-orbitcontrols.js";
+
+      const mouseEventHandler = makeSendPropertiesHandler([
+        "ctrlKey",
+        "metaKey",
+        "shiftKey",
+        "button",
+        "pointerType",
+        "clientX",
+        "clientY",
+        "pageX",
+        "pageY",
+      ]);
+      const wheelEventHandlerImpl = makeSendPropertiesHandler([
+        "deltaX",
+        "deltaY",
+      ]);
+      const keydownEventHandler = makeSendPropertiesHandler([
+        "ctrlKey",
+        "metaKey",
+        "shiftKey",
+        "keyCode",
+      ]);
+
+      function wheelEventHandler(event, sendFn) {
+        event.preventDefault();
+        wheelEventHandlerImpl(event, sendFn);
+      }
+
+      function preventDefaultHandler(event) {
+        event.preventDefault();
+      }
+
+      function copyProperties(src, properties, dst) {
+        for (const name of properties) {
+          dst[name] = src[name];
+        }
+      }
+
+      function makeSendPropertiesHandler(properties) {
+        return function sendProperties(event, sendFn) {
+          const data = { type: event.type };
+          copyProperties(event, properties, data);
+          sendFn(data);
+        };
+      }
+
+      function touchEventHandler(event, sendFn) {
+        const touches = [];
+        const data = { type: event.type, touches };
+        for (let i = 0; i < event.touches.length; i++) {
+          const touch = event.touches[i];
+          touches.push({
+            pageX: touch.pageX,
+            pageY: touch.pageY,
+          });
+        }
+        sendFn(data);
+      }
+
+      // 키보드 화살표 키
+      const orbitKeys = {
+        37: true, // 왼쪽 화살표 키의 아스키코드를 key로 지정함
+        38: true, // 위쪽
+        39: true, // 오른쪽
+        40: true, // 아래쪽
+      };
+
+      function filteredKeydownEventHandler(event, sendFn) {
+        const { keyCode } = event;
+        if (orbitKeys[keyCode]) {
+          event.preventDefault();
+          keydownEventHandler(event, sendFn);
+        }
+      }
+
+      let nextProxyId = 0;
+
+      class ElementProxy {
+        constructor(element, worker, eventHandlers) {
+          this.id = nextProxyId++;
+          this.worker = worker;
+          const sendEvent = (data) => {
+            this.worker.postMessage({
+              type: "event", // 얘는 웹워커에 있는 프록시 매니저 인스턴스의 handleEvent 메서드를 호출시키는 함수가 되겠군.
+              id: this.id,
+              data,
+            });
+          };
+
+          // 새로운 id값이 지정된 프록시 인스턴스를 만들도록 함.
+          worker.postMessage({
+            type: "makeProxy", // 얘는 웹워커에 있는 프록시 매니저 인스턴스의 makeProxy 메서드를 호출시킬거임.
+            id: this.id,
+          });
+          sendSize();
+
+          /**
+           * Object.entries(객체)
+           * 얘는 전달하는 객체(여기서는 eventHandlers지?)의 열겨 가능한 속성들을 [key, value] 쌍의 배열로 반환해 줌
+           *
+           * 지금 for...of loop에서는 이렇게 리턴받은 각각의 [key, value] 쌍을
+           * 각각의 반복문에서 const eventName = key, const handler = value 이렇게 할당한다는 뜻이고,
+           *
+           * ElementProxy 객체를 생성할 때 처음 전달받는 element(메인 스크립트에서는 canvas를 전달해줄거임)에
+           * 이벤트를 걸어놓고, 이벤트 유형은 eventName으로 할당하고,
+           * 해당 유형에 대한 event객체와 위에서 만든 sendEvent(워커용 스크립트에 메시지를 보내는 함수가 할당됨)를
+           * 전달하면서 handler를 호출함(아마 handler에 할당되는 value는 함수 형태의 값들일거임.)
+           *
+           * 결과적으로 전달받는 canvas 요소에 대해 eventHandler안에 정의된 모든 이벤트들에 대한 이벤트들을 걸어두는거임.
+           */
+          for (const [eventName, handler] of Object.entries(eventHandlers)) {
+            element.addEventListener(eventName, function (event) {
+              handler(event, sendEvent);
+            });
+          }
+
+          function sendSize() {
+            const rect = element.getBoundingClientRect();
+            sendEvent({
+              type: "size",
+              left: rect.left,
+              top: rect.top,
+              width: element.clientWidth,
+              height: element.clientHeight,
+            });
+          }
+
+          window.addEventListener("resize", sendSize);
+        }
+      }
+
+      // 브라우저가 OffscreenCanvas를 지원할 때 호출하는 함수 (웹워커 사용)
+      function startWorker(canvas) {
+        const offscreen = canvas.transferControlToOffscreen();
+        const worker = new Worker("offscreencanvas-worker-orbitcontrols.js", {
+          type: "module",
+        });
+
+        // ElementProxy 인스턴스를 생성할 때 넘겨줄 핸들러 맵(각 이벤트가 발생할 때마다 호출해줄 함수들 모음)을 정리해놓음
+        const eventHandlers = {
+          contextmenu: preventDefaultHandler,
+          mousedown: mouseEventHandler,
+          mousemove: mouseEventHandler,
+          mouseup: mouseEventHandler,
+          pointerdown: mouseEventHandler,
+          pointermove: mouseEventHandler,
+          pointerup: mouseEventHandler,
+          touchstart: touchEventHandler,
+          touchmove: touchEventHandler,
+          touchend: touchEventHandler,
+          wheel: wheelEventHandler,
+          keydown: filteredKeydownEventHandler,
+        };
+        const proxy = new ElementProxy(canvas, worker, eventHandlers); // 이벤트 우회 요소를 생성함.
+
+        worker.postMessage(
+          { type: "start", canvas: offscreen, canvasId: proxy.id },
+          [offscreen]
+        );
+
+        console.log("using OffscreenCanvas");
+      }
+
+      // 브라우저가 OffscreenCanvas를 지원하지 않을 때 호출하는 함수 (웹워커 미사용)
+      function startMainPage(canvas) {
+        // offscreenCanvas를 지원하지 않는다면 웹워커에서 만든 프록시 인스턴스를 전달해서 OrbitControls에 넣어줄 필요가 없으니
+        // 그냥 똑같은 canvas 요소를 전달해주면 되겠찌
+        init({ canvas, inputElement: canvas });
+
+        // 여기서는 sendMouse 변수에 pickPosition에 mousemove 이벤트 좌표값을 바로 업데이트해주는 익명함수가 할당됨.
+        sendMouse = (x, y) => {
+          pickPosition.x = x;
+          pickPosition.y = y;
+        };
+
+        function sendSize() {
+          state.width = canvas.clientWidth;
+          state.height = canvas.clientHeight;
+        }
+        window.addEventListener("resize", sendSize);
+        sendSize();
+
+        console.log("using regular canvas");
+      }
+
+      // 캔버스 요소를 참조한 뒤, 현재 브라우저의 OffscreenCanvas 지원 여부에 따라 startWorker() 또는 startMainPage() 함수를 호출함.
+      function main() {
+        const canvas = document.querySelector("#canvas");
+
+        if (canvas.transferControlToOffscreen) {
+          startWorker(canvas);
+        } else {
+          startMainPage(canvas);
+        }
+      }
+
+      main();
+    </script>
+  </body>
+</html>
